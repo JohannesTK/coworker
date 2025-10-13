@@ -10,26 +10,42 @@ import time
 from datetime import datetime
 from typing import Optional
 
+# Fix Windows console encoding for emoji/unicode support
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 from desktop_observer import DesktopObserver
 from llm_client import LLMClient
 from memory import MemoryManager
 from action_executor import ActionExecutor
 from hotkey_listener import HotkeyListener
-from config import CONTINUOUS_MODE_INTERVAL, HOTKEY
+from config import CONTINUOUS_MODE_INTERVAL, HOTKEY, IS_WINDOWS, IS_MACOS, PLATFORM
 
 
 class CoworkerAgent:
     """Main agent orchestrator"""
 
     def __init__(self):
-        print("Initializing Coworker AI Agent...")
+        print(f"Initializing Coworker AI Agent on {PLATFORM}...")
+
+        # Platform-specific initialization messages
+        if IS_WINDOWS:
+            print("[OK] Using Windows UI Automation API")
+        elif IS_MACOS:
+            print("[OK] Using macOS Accessibility API")
+            print("[!] Note: Ensure Accessibility permissions are granted in System Settings")
+        else:
+            print("[OK] Using Linux AT-SPI (experimental)")
+
         self.observer = DesktopObserver()
         self.llm = LLMClient()
         self.memory = MemoryManager()
         self.executor = ActionExecutor()
         self.hotkey_listener: Optional[HotkeyListener] = None
         self.running = False
-        print("✓ All components initialized\n")
+        print("[OK] All components initialized\n")
 
     async def analyze_and_recommend(self):
         """Main observation -> analysis -> recommendation flow"""
@@ -274,14 +290,15 @@ class CoworkerAgent:
 
 async def main():
     """Main entry point"""
+    # Use simple ASCII art that works across all platforms
     print("""
-╔═══════════════════════════════════════════════════════════════════════════╗
-║                                                                           ║
-║                          COWORKER AI AGENT                                ║
-║                                                                           ║
-║              Your Expert Productivity Assistant                          ║
-║                                                                           ║
-╚═══════════════════════════════════════════════════════════════════════════╝
+===============================================================================
+
+                          COWORKER AI AGENT
+
+              Your Expert Productivity Assistant
+
+===============================================================================
     """)
 
     # Parse command line arguments
@@ -295,9 +312,10 @@ async def main():
         elif arg in ["once", "o"]:
             mode = "once"
         else:
+            hotkey_name = "CTRL+G" if IS_WINDOWS else "CMD+G"
             print(f"Usage: python agent.py [continuous|triggered|once]")
             print(f"  continuous (default) - Monitor desktop continuously")
-            print(f"  triggered - Wait for CMD+G hotkey")
+            print(f"  triggered - Wait for {hotkey_name} hotkey")
             print(f"  once - Run once and exit")
             return
 

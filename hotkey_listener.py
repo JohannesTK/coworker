@@ -4,11 +4,11 @@ from typing import Callable, Optional
 from pynput import keyboard
 from pynput.keyboard import Key, KeyCode
 
-from config import HOTKEY
+from config import HOTKEY, IS_WINDOWS, IS_MACOS
 
 
 class HotkeyListener:
-    """Listens for global hotkey (CMD+G) to trigger agent"""
+    """Listens for global hotkey (Ctrl+G on Windows, Cmd+G on macOS) to trigger agent"""
 
     def __init__(self, callback: Callable):
         """

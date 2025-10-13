@@ -1,10 +1,17 @@
 """Configuration settings for Coworker AI Agent"""
 import os
+import platform
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Platform detection
+PLATFORM = platform.system()  # 'Windows', 'Darwin' (macOS), or 'Linux'
+IS_WINDOWS = PLATFORM == 'Windows'
+IS_MACOS = PLATFORM == 'Darwin'
+IS_LINUX = PLATFORM == 'Linux'
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent
@@ -41,7 +48,8 @@ MAX_HISTORY_ITEMS = 50  # Max items to keep in context before summarizing
 # Agent settings
 CONTINUOUS_MODE_INTERVAL = 30  # seconds between observations in continuous mode
 OBSERVATION_DEPTH = 3  # How deep to traverse accessibility tree
-HOTKEY = "cmd+g"  # Hotkey for triggered mode
+# Hotkey for triggered mode - platform-specific (Ctrl+G on Windows, Cmd+G on macOS)
+HOTKEY = "ctrl+g" if IS_WINDOWS else "cmd+g"
 
 # Action settings
 ACTION_CONFIRMATION_REQUIRED = True
