@@ -1,0 +1,22 @@
+# Coworker AI Agent Dependencies
+
+# Desktop automation
+terminator
+
+# OpenAI API
+openai>=1.0.0
+
+# Token counting
+tiktoken
+
+# Environment variables
+python-dotenv
+
+# Hotkey detection
+pynput
+
+# Image processing (for OCR)
+Pillow
+
+# Terminal UI (optional, for future enhancements)
+rich
