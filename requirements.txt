@@ -1,22 +1,20 @@
-# Coworker AI Agent Dependencies
+# Core dependencies for desktop monitoring
+pyobjc
 
-# Desktop automation
-terminator
-
-# OpenAI API
+# LLM API clients
 openai>=1.0.0
+python-dotenv>=1.0.0
 
-# Token counting
-tiktoken
+# Action execution and automation
+pyautogui>=0.9.54
+pynput>=1.7.6
 
-# Environment variables
-python-dotenv
+# Enhanced CLI and utilities
+rich>=13.0.0
+typer>=0.9.0
+pydantic>=2.0.0
 
-# Hotkey detection
-pynput
-
-# Image processing (for OCR)
-Pillow
-
-# Terminal UI (optional, for future enhancements)
-rich
+# Development dependencies (optional)
+pytest>=7.0.0
+black>=22.0.0
+flake8>=5.0.0
