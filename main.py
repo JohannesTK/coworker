@@ -14,6 +14,14 @@ import os
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not installed, continue without it
+    pass
+
 # Import our desktop monitoring module
 from ax_inspect import collect_state, cleanup_foundation_resources
 
@@ -243,7 +251,7 @@ class DesktopTaskAnalyzer:
     def __init__(self, groq_api_key: Optional[str] = None):
         self.groq_client = GroqAPIClient(groq_api_key)
     
-    def analyze_desktop(self, duration: int = 5, max_depth: int = 2, max_children: int = 40) -> List[TaskSuggestion]:
+    def analyze_desktop(self, duration: int = 5, max_depth: int = 2, max_children: int = 40, include_helpers: bool = False) -> List[TaskSuggestion]:
         """
         Monitor desktop for specified duration and analyze potential tasks.
         
@@ -263,7 +271,7 @@ class DesktopTaskAnalyzer:
             max_children=max_children,
             include_menubar=False,
             include_dock=False,
-            include_helpers=getattr(args, 'include_helpers', False)
+            include_helpers=include_helpers
         )
         
         # Wait for specified duration
@@ -275,7 +283,7 @@ class DesktopTaskAnalyzer:
             max_children=max_children,
             include_menubar=False,
             include_dock=False,
-            include_helpers=getattr(args, 'include_helpers', False)
+            include_helpers=include_helpers
         )
         
         print("📊 Analyzing desktop activity...")
@@ -285,7 +293,7 @@ class DesktopTaskAnalyzer:
         
         return tasks
     
-    def monitor_continuously(self, interval: int = 5, max_depth: int = 2, max_children: int = 40, no_pygui_delay: bool = False):
+    def monitor_continuously(self, interval: int = 5, max_depth: int = 2, max_children: int = 40, no_pygui_delay: bool = False, include_helpers: bool = False):
         """
         Continuously monitor desktop every N seconds and provide task suggestions.
         
@@ -312,7 +320,7 @@ class DesktopTaskAnalyzer:
                     max_children=max_children,
                     include_menubar=False,
                     include_dock=False,
-                    include_helpers=args.include_helpers
+                    include_helpers=include_helpers
                 )
                 
                 # Analyze and get suggestions
@@ -546,14 +554,16 @@ Environment Variables:
                     interval=args.duration,
                     max_depth=max_depth,
                     max_children=max_children,
-                    no_pygui_delay=args.no_pygui_delay
+                    no_pygui_delay=args.no_pygui_delay,
+                    include_helpers=args.include_helpers
                 )
         else:
             # Analyze desktop once
             tasks = analyzer.analyze_desktop(
                 duration=args.duration,
                 max_depth=max_depth,
-                max_children=max_children
+                max_children=max_children,
+                include_helpers=args.include_helpers
             )
             
             # Print results

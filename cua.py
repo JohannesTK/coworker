@@ -28,10 +28,14 @@ from rich.table import Table
 from rich.text import Text
 import typer
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not installed, continue without it
+    pass
 
 # Import our desktop monitoring module
 from ax_inspect import collect_state, cleanup_foundation_resources
@@ -117,6 +121,9 @@ class CUAAgent:
         
         # Check permissions
         self._check_permissions()
+        
+        # Clean up any existing accessibility resources
+        self._cleanup_resources()
     
     def _check_permissions(self):
         """Check if the application has necessary permissions."""
@@ -152,11 +159,193 @@ class CUAAgent:
             console.print(f"[yellow]⚠️ PyAutoGUI may not work: {e}[/yellow]")
             console.print("[yellow]PyAutoGUI requires additional permissions but AppleScript will be used as fallback[/yellow]")
     
+    def _cleanup_resources(self):
+        """Clean up accessibility resources between runs."""
+        try:
+            # Import cleanup function
+            from ax_inspect import cleanup_foundation_resources
+            cleanup_foundation_resources()
+            
+            # Small delay to let system settle
+            time.sleep(0.5)
+            
+        except Exception as e:
+            console.print(f"[yellow]Cleanup warning: {e}[/yellow]")
+    
+    def _log_active_window_tree(self, desktop_state: Dict[str, Any]) -> None:
+        """Log the accessibility tree of the active/frontmost window."""
+        try:
+            windows = desktop_state.get('windows', [])
+            frontmost_pid = desktop_state.get('meta', {}).get('frontmost_pid')
+            menubar_items = desktop_state.get('menubar_items', [])
+            
+            # Determine active app from menubar
+            active_app_from_menubar = None
+            if menubar_items:
+                # Debug: show all menubar items
+                console.print(f"[blue]Menubar items: {[item.get('title', '') for item in menubar_items[:5]]}[/blue]")
+                # The first menubar item is usually the app name
+                first_item = menubar_items[0] if menubar_items else {}
+                active_app_from_menubar = first_item.get('title', '')
+            else:
+                console.print("[yellow]No menubar items found[/yellow]")
+            
+            console.print(f"[blue]Active app (from menubar): {active_app_from_menubar}[/blue]")
+            console.print(f"[blue]Frontmost PID: {frontmost_pid}[/blue]")
+            
+            # Find Calculator window first (priority for Calculator tasks)
+            calculator_window = None
+            for window in windows:
+                if 'Calculator' in window.get('owner', '') and window.get('z_index', 0) > 0:
+                    calculator_window = window
+                    break
+            
+            # Find the frontmost window
+            frontmost_window = None
+            for window in windows:
+                if window.get('pid') == frontmost_pid and window.get('z_index', 0) > 0:
+                    frontmost_window = window
+                    break
+            
+            # Determine which window to treat as "active" - prioritize Calculator if visible
+            active_window = calculator_window if calculator_window else frontmost_window
+            
+            if active_window:
+                window_name = active_window.get('name', 'Unknown')
+                window_owner = active_window.get('owner', 'Unknown')
+                ax_tree = active_window.get('ax_tree', {})
+                
+                if calculator_window and calculator_window == active_window:
+                    console.print(f"[green]Calculator is active: {window_owner} - {window_name}[/green]")
+                else:
+                    console.print(f"[blue]Active window: {window_owner} - {window_name}[/blue]")
+                
+                if ax_tree:
+                    console.print("[blue]Active window tree structure:[/blue]")
+                    self._debug_tree_structure(ax_tree, max_depth=8)  # Increased depth to see Calculator buttons
+                else:
+                    console.print("[yellow]No accessibility tree for active window[/yellow]")
+            else:
+                console.print("[yellow]No active window found[/yellow]")
+            
+            # Log frontmost window info for debugging
+            if frontmost_window and frontmost_window != active_window:
+                fm_name = frontmost_window.get('name', 'Unknown')
+                fm_owner = frontmost_window.get('owner', 'Unknown')
+                console.print(f"[dim]Frontmost window: {fm_owner} - {fm_name}[/dim]")
+                
+        except Exception as e:
+            console.print(f"[yellow]Error logging active window tree: {e}[/yellow]")
+    
+    def _debug_tree_structure(self, ax_tree: Dict[str, Any], max_depth: int = 3) -> None:
+        """Debug helper to show tree structure."""
+        
+        def traverse(node, depth=0):
+            if depth > max_depth:
+                return
+            
+            node_title = node.get('title', '')
+            node_description = node.get('description', '')
+            node_value = node.get('value', '')
+            node_role = node.get('role', '')
+            children = node.get('children', [])
+            
+            indent = "  " * depth
+            element_info = f"{node_role}"
+            if node_title:
+                element_info += f" '{node_title}'"
+            if node_description:
+                element_info += f" (desc: '{node_description}')"
+            if node_value:
+                element_info += f" (value: '{node_value}')"
+            
+            console.print(f"[dim]{indent}{element_info} ({len(children)} children)[/dim]")
+            
+            for child in children:
+                traverse(child, depth + 1)
+        
+        traverse(ax_tree)
+    
+    def _verify_ui_ready(self, goal: str, desktop_state: Dict[str, Any]) -> bool:
+        """Use LLM to verify if the UI is ready for the next action."""
+        try:
+            summary = self._create_desktop_summary(desktop_state)
+            
+            prompt = f"""
+GOAL: {goal}
+
+CURRENT DESKTOP STATE:
+{summary}
+
+EXECUTED ACTIONS: {len(self.executed_actions)}
+
+Analyze the current desktop state and determine if the UI is ready for the next action. Look for:
+
+1. **App Launch State**: If an app was recently launched, is it fully loaded and ready?
+2. **Active App Detection**: Check the menubar to see which app is actually active (this is more reliable than window focus)
+3. **UI Elements**: Are the expected UI elements (buttons, fields, etc.) visible and accessible?
+4. **Loading Indicators**: Are there any loading spinners, progress bars, or other indicators that suggest the UI is still settling?
+5. **Race Conditions**: Does the accessibility tree look incomplete or missing expected elements?
+6. **Target App Visibility**: For Calculator tasks, is the Calculator window visible even if not active?
+
+Respond with only "READY" if the UI is ready for the next action, or "WAIT" if it needs more time to settle.
+
+Examples:
+- App just launched but accessibility tree is empty → WAIT
+- Menubar shows Calculator is active → READY
+- Window focused but buttons not visible → WAIT  
+- All expected elements present and accessible → READY
+- Loading indicators visible → WAIT
+- Calculator visible but Terminal still active → READY (can proceed with Calculator)
+"""
+
+            response = self.client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=10
+            )
+            
+            result = response.choices[0].message.content.strip().upper()
+            return result == "READY"
+            
+        except Exception as e:
+            console.print(f"[yellow]UI verification failed: {e}[/yellow]")
+            return True  # Default to ready if verification fails
+    
+    def _wait_for_ui_ready(self, goal: str, max_wait: float = 5.0) -> bool:
+        """Wait for UI to be ready, checking periodically."""
+        console.print("[blue]Verifying UI is ready...[/blue]")
+        
+        start_time = time.time()
+        while time.time() - start_time < max_wait:
+            try:
+                # Capture current state
+                current_state = self._safe_capture_desktop_state()
+                
+                # Log active window tree for debugging
+                self._log_active_window_tree(current_state)
+                
+                # Check if UI is ready
+                if self._verify_ui_ready(goal, current_state):
+                    console.print("[green]UI is ready[/green]")
+                    return True
+                
+                console.print("[yellow]UI not ready, waiting...[/yellow]")
+                time.sleep(1.0)
+                
+            except Exception as e:
+                console.print(f"[yellow]UI verification error: {e}[/yellow]")
+                time.sleep(1.0)
+        
+        console.print("[yellow]UI verification timeout, proceeding anyway[/yellow]")
+        return False
+    
     def capture_desktop_state(self) -> Dict[str, Any]:
         """Capture current desktop state."""
         return collect_state(
-            max_depth=4,
-            max_children=100,
+            max_depth=10,  # Increased depth to reach Calculator buttons
+            max_children=500,  # Increased children limit to capture all Calculator buttons
             include_menubar=True,
             include_dock=True,
             include_helpers=False
@@ -174,10 +363,10 @@ class CUAAgent:
         signal.alarm(10)  # 10 second timeout
         
         try:
-            # Use reduced parameters for safety
+            # Use moderate parameters for safety but still useful
             state = collect_state(
-                max_depth=2,  # Reduced depth
-                max_children=50,  # Reduced children
+                max_depth=8,  # Increased depth to reach Calculator buttons
+                max_children=300,  # Increased children limit to capture Calculator buttons
                 include_menubar=False,  # Skip menubar
                 include_dock=False,  # Skip dock
                 include_helpers=False
@@ -360,30 +549,51 @@ Respond with a JSON plan in this exact format:
                 script = f'''
                 tell application "System Events"
                     try
-                        -- Strategy 1: Try description first
-                        set targetElement to first UI element whose role is "{element_role}" and description contains "{element_description}"
+                        -- Strategy 1: Try description first (most specific)
+                        set targetElement to first UI element whose description contains "{element_description}"
                         click targetElement
                         return "success"
                     on error
                         try
-                            -- Strategy 2: Try title
-                            set targetElement to first UI element whose role is "{element_role}" and name contains "{element_title}"
+                            -- Strategy 2: Try title/name
+                            set targetElement to first UI element whose name contains "{element_title}"
                             click targetElement
                             return "success"
                         on error
                             try
-                                -- Strategy 3: Try just role (less specific)
-                                set targetElement to first UI element whose role is "{element_role}"
+                                -- Strategy 3: Try role + description
+                                set targetElement to first UI element whose role is "{element_role}" and description contains "{element_description}"
                                 click targetElement
                                 return "success"
                             on error
                                 try
-                                    -- Strategy 4: Try description without role
-                                    set targetElement to first UI element whose description contains "{element_description}"
+                                    -- Strategy 4: Try role + title
+                                    set targetElement to first UI element whose role is "{element_role}" and name contains "{element_title}"
                                     click targetElement
                                     return "success"
                                 on error
-                                    return "Element not found"
+                                    try
+                                        -- Strategy 5: Try just role (less specific)
+                                        set targetElement to first UI element whose role is "{element_role}"
+                                        click targetElement
+                                        return "success"
+                                    on error
+                                        try
+                                            -- Strategy 6: Try value attribute
+                                            set targetElement to first UI element whose value contains "{element_title}"
+                                            click targetElement
+                                            return "success"
+                                        on error
+                                            try
+                                                -- Strategy 7: Try any UI element with the text
+                                                set targetElement to first UI element whose (description contains "{element_title}" or name contains "{element_title}" or value contains "{element_title}")
+                                                click targetElement
+                                                return "success"
+                                            on error
+                                                return "Element not found"
+                                            end try
+                                        end try
+                                    end try
                                 end try
                             end try
                         end try
@@ -394,6 +604,47 @@ Respond with a JSON plan in this exact format:
                 if result.returncode != 0 or "Element not found" in result.stdout:
                     console.print(f"[yellow]Could not find element: {element_role} '{element_description or element_title}'[/yellow]")
                     console.print(f"[yellow]AppleScript output: {result.stdout.strip()}[/yellow]")
+                    
+                    # Try pyautogui fallback with coordinates
+                    try:
+                        # Get current desktop state to find coordinates
+                        current_state = self._safe_capture_desktop_state()
+                        windows = current_state.get('windows', [])
+                        
+                        # Look for the element in any visible window
+                        # Prioritize Calculator window for Calculator-related actions
+                        calculator_window = None
+                        other_windows = []
+                        
+                        for window in windows:
+                            if window.get('z_index', 0) > 0:  # Only visible windows
+                                if 'Calculator' in window.get('owner', ''):
+                                    calculator_window = window
+                                else:
+                                    other_windows.append(window)
+                        
+                        # Search Calculator window first if available
+                        if calculator_window:
+                            ax_tree = calculator_window.get('ax_tree', {})
+                            if ax_tree:
+                                element_coords = self._find_element_coordinates(ax_tree, element_title, element_description)
+                                if element_coords:
+                                    pyautogui.click(element_coords[0], element_coords[1])
+                                    console.print(f"[green]Found element via coordinates in Calculator: {element_coords}[/green]")
+                                    return True
+                        
+                        # Search other windows
+                        for window in other_windows:
+                            ax_tree = window.get('ax_tree', {})
+                            if ax_tree:
+                                element_coords = self._find_element_coordinates(ax_tree, element_title, element_description)
+                                if element_coords:
+                                    pyautogui.click(element_coords[0], element_coords[1])
+                                    console.print(f"[green]Found element via coordinates: {element_coords}[/green]")
+                                    return True
+                    except Exception as e:
+                        console.print(f"[yellow]Coordinate fallback failed: {e}[/yellow]")
+                    
                     return False
                 
             elif action.type == ActionType.TYPE:
@@ -593,7 +844,12 @@ Respond with a JSON plan in this exact format:
     def assess_goal_progress(self, goal: str, current_state: Dict[str, Any]) -> float:
         """Assess progress towards the goal (0.0 to 1.0)."""
         
-        # Create a simple assessment prompt
+        # First try rule-based assessment
+        rule_progress = self._assess_goal_progress_rules(goal, current_state)
+        if rule_progress is not None:
+            return rule_progress
+        
+        # Fall back to AI-based assessment
         summary = self._create_desktop_summary(current_state)
         
         prompt = f"""
@@ -604,10 +860,13 @@ CURRENT DESKTOP STATE:
 
 EXECUTED ACTIONS: {len(self.executed_actions)}
 
-Assess the progress towards the goal on a scale of 0.0 to 1.0, where:
-- 0.0 = No progress made
-- 0.5 = Some progress, but goal not achieved
-- 1.0 = Goal completely achieved
+Analyze the current desktop state and determine if the goal has been achieved. Look for:
+1. Visual indicators that the task is complete (results, confirmations, success messages)
+2. UI elements that suggest the operation finished successfully
+3. Changes in the interface that indicate completion
+4. Any text or numbers that represent the expected outcome
+
+Be strict about completion - only return 1.0 if the goal is clearly achieved with visible evidence.
 
 Respond with only a number between 0.0 and 1.0.
 """
@@ -626,6 +885,143 @@ Respond with only a number between 0.0 and 1.0.
             
         except Exception:
             return 0.5  # Default moderate progress
+    
+    def _assess_goal_progress_rules(self, goal: str, current_state: Dict[str, Any]) -> Optional[float]:
+        """Rule-based goal progress assessment for common patterns."""
+        
+        # Extract key information from desktop state
+        windows = current_state.get('windows', [])
+        visible_windows = [w for w in windows if w.get('z_index', 0) > 0]
+        
+        # Look for completion indicators in UI elements
+        completion_indicators = []
+        
+        for window in visible_windows:
+            ax_tree = window.get('ax_tree', {})
+            if ax_tree:
+                # Extract all text content from the window
+                all_text = self._extract_all_text_content(ax_tree)
+                completion_indicators.extend(all_text)
+        
+        # Check for common completion patterns
+        goal_lower = goal.lower()
+        
+        # For calculation tasks - look for numeric results
+        if any(word in goal_lower for word in ['calculate', 'compute', 'math', 'add', 'subtract', 'multiply', 'divide']):
+            # Look for numeric results in the UI
+            for text in completion_indicators:
+                if text and any(char.isdigit() for char in text):
+                    # If we see numbers, likely a calculation result
+                    if len(self.executed_actions) >= 3:  # At least some actions executed
+                        return 0.9
+        
+        # For app opening tasks
+        if any(word in goal_lower for word in ['open', 'launch', 'start']):
+            # Look for any new application window that appeared
+            if len(self.executed_actions) >= 1:  # At least one action executed
+                return 0.8
+        
+        # For navigation tasks
+        if any(word in goal_lower for word in ['navigate', 'go to', 'visit', 'open']):
+            url_indicators = ['http', 'www', '.com', '.org', '.net']
+            for text in completion_indicators:
+                if any(indicator in text.lower() for indicator in url_indicators):
+                    return 0.9
+        
+        # For document creation/editing
+        if any(word in goal_lower for word in ['create', 'write', 'edit', 'document']):
+            text_fields = []
+            for window in visible_windows:
+                ax_tree = window.get('ax_tree', {})
+                if ax_tree:
+                    text_fields.extend(self._extract_text_fields(ax_tree))
+            
+            if text_fields and len(self.executed_actions) >= 2:
+                return 0.8
+        
+        return None  # No rule matched, use AI assessment
+    
+    def _extract_all_text_content(self, ax_tree: Dict[str, Any]) -> List[str]:
+        """Extract all text content from accessibility tree."""
+        texts = []
+        
+        def traverse(node):
+            # Extract text from various sources
+            for key in ['title', 'description', 'value', 'help']:
+                if key in node and node[key]:
+                    texts.append(str(node[key]))
+            
+            # Traverse children
+            children = node.get('children', [])
+            for child in children:
+                traverse(child)
+        
+        traverse(ax_tree)
+        return [t for t in texts if t and t.strip()]
+    
+    def _extract_text_fields(self, ax_tree: Dict[str, Any]) -> List[str]:
+        """Extract text from text input fields."""
+        text_fields = []
+        
+        def traverse(node):
+            role = node.get('role', '')
+            if role in ['AXTextField', 'AXTextArea', 'AXStaticText']:
+                value = node.get('value', '') or node.get('title', '')
+                if value:
+                    text_fields.append(str(value))
+            
+            children = node.get('children', [])
+            for child in children:
+                traverse(child)
+        
+        traverse(ax_tree)
+        return text_fields
+    
+    
+    def _find_element_coordinates(self, ax_tree: Dict[str, Any], title: str, description: str) -> Optional[tuple]:
+        """Find coordinates of a UI element in the accessibility tree."""
+        
+        def traverse(node):
+            # Check if this node matches our criteria
+            node_title = node.get('title', '')
+            node_description = node.get('description', '')
+            node_value = node.get('value', '')
+            node_role = node.get('role', '')
+            
+            # Debug: print matching elements
+            if (title and title in node_title) or (description and description in node_description) or (title and title in node_value):
+                console.print(f"[green]Found matching element: role='{node_role}', title='{node_title}', desc='{node_description}', value='{node_value}'[/green]")
+                
+                # Get position if available
+                position = node.get('position')
+                size = node.get('size')
+                
+                console.print(f"[blue]Position data: position={position}, size={size}[/blue]")
+                
+                if position and isinstance(position, dict) and 'x' in position and 'y' in position:
+                    x = position['x']
+                    y = position['y']
+                    
+                    # Add half the size to get center coordinates
+                    if size and isinstance(size, dict) and 'width' in size and 'height' in size:
+                        x += size['width'] // 2
+                        y += size['height'] // 2
+                    
+                    console.print(f"[green]Calculated center coordinates: ({x}, {y})[/green]")
+                    return (x, y)
+                else:
+                    console.print(f"[yellow]No valid position data for element[/yellow]")
+            
+            # Traverse children
+            children = node.get('children', [])
+            for child in children:
+                result = traverse(child)
+                if result:
+                    return result
+            
+            return None
+        
+        return traverse(ax_tree)
     
     def _create_desktop_summary(self, desktop_data: Dict[str, Any]) -> str:
         """Create a concise summary of desktop state for AI analysis."""
@@ -758,6 +1154,10 @@ Respond with only a number between 0.0 and 1.0.
                 console.print(f"[cyan]Step {i+1}/{len(self.current_plan.steps)}:[/cyan] {step.description}")
                 
                 try:
+                    # Wait for UI to be ready before executing action
+                    if step.type in [ActionType.OPEN_APP, ActionType.FOCUS_WINDOW]:
+                        self._wait_for_ui_ready(goal, max_wait=3.0)
+                    
                     # Execute action with timeout protection
                     success = self.execute_action(step)
                     if not success:
@@ -766,6 +1166,30 @@ Respond with only a number between 0.0 and 1.0.
                     
                     # Small delay between actions
                     time.sleep(0.5)
+                    
+                    # Refresh desktop state after each action (except last one)
+                    if i < len(self.current_plan.steps) - 1:
+                        console.print("[dim]Refreshing desktop state...[/dim]")
+                        try:
+                            # Quick cleanup before state refresh
+                            self._cleanup_resources()
+                            
+                            # Quick state refresh to see UI changes
+                            new_state = self._safe_capture_desktop_state()
+                            
+                            # Log active window tree
+                            self._log_active_window_tree(new_state)
+                            
+                            # Verify UI is ready for next action
+                            if not self._verify_ui_ready(goal, new_state):
+                                console.print("[yellow]UI not ready, waiting briefly...[/yellow]")
+                                time.sleep(1.0)
+                            
+                            # Update current state for next action
+                            current_state = new_state
+                        except Exception as e:
+                            console.print(f"[dim]State refresh failed: {e}[/dim]")
+                            # Continue with previous state
                     
                 except KeyboardInterrupt:
                     console.print("\n[yellow]Execution interrupted by user[/yellow]")
@@ -794,6 +1218,9 @@ Respond with only a number between 0.0 and 1.0.
                 try:
                     # Use timeout protection for desktop state capture
                     new_state = self._safe_capture_desktop_state()
+                    
+                    # Log active window tree during observation
+                    self._log_active_window_tree(new_state)
                     
                     # Detect changes
                     changes = self.observe_changes(current_state, new_state)
@@ -837,6 +1264,9 @@ Respond with only a number between 0.0 and 1.0.
             
             # Clean up resources
             cleanup_foundation_resources()
+            
+            # Additional cleanup between iterations
+            self._cleanup_resources()
         
         console.print("[yellow]Maximum iterations reached. Goal may not be fully achieved.[/yellow]")
         return False
@@ -858,6 +1288,12 @@ def run(
             console.print("[bold green]✓ Goal completed successfully![/bold green]")
         else:
             console.print("[bold red]✗ Goal not completed[/bold red]")
+        
+        # Final cleanup
+        try:
+            agent._cleanup_resources()
+        except:
+            pass
             
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
